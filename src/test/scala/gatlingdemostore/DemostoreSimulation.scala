@@ -15,24 +15,39 @@ class DemostoreSimulation extends Simulation {
     .baseUrl("https://" + domain)
 
 
+  object CmsPage {
+    def homePage = {
+    exec(http("Load Home Page")
+      .get("/")
+      .check(status.is(200))
+      .check(css("#_csrf", "content").saveAs("csrfValue"))
+      )
+    }
+
+    def aboutUs  = {
+    exec(http("Load About us Page")
+      .get("/about-us")
+      .check(status.is(200))
+      .check(substring("About Us"))
+
+      )
+    }
+
+
+  }
 
 
 
   val scn = scenario("RecordedSimulation")
-    .exec(http("Load Home Page")
-      .get("/")
-      .check(css("#_csrf", "content").saveAs("csrfValue"))
-    )
+    .exec(CmsPage.homePage)
     .pause(2)
-    .exec(http("Load About us Page")
-      .get("/about-us")
-    )
+    .exec(CmsPage.aboutUs)
     .pause(2)
     .exec(http("Load Categories Page")
       .get("/category/all")
     )
     .pause(2)
-    .exec(http("Load Product pAGE")
+    .exec(http("Load Product Page")
       .get("/product/black-and-red-glasses")
     )
     .pause(2)
