@@ -1,0 +1,10 @@
+{
+  "simulation": "gatlingdemostore.DemostoreSimulation",
+  "simulationId": "demostoresimulation",
+  "start": 1700163920420,
+  "description": "",
+  "scenarios": ["Default Load Test"],
+  "assertions": [
+
+  ]
+}

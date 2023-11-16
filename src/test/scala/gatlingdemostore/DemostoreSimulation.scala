@@ -1,10 +1,11 @@
 package gatlingdemostore
 
 import scala.concurrent.duration._
-
 import io.gatling.core.Predef._
 import io.gatling.http.Predef._
 import io.gatling.jdbc.Predef._
+
+import scala.util.Random
 
 class DemostoreSimulation extends Simulation {
 
@@ -13,9 +14,33 @@ class DemostoreSimulation extends Simulation {
   val httpProtocol = http
     .baseUrl("https://" + domain)
 
+  def userCount: Int = getProperty("USERS", "5").toInt
+
+  def rampDuration: Int = getProperty("RAMP_DURATION", "10").toInt
+
+  def testDuration: Int = getProperty("DURATION", "60").toInt
+
+  private def getProperty(propertyName: String, defaultValue: String) = {
+    Option(System.getenv(propertyName))
+      .orElse(Option(System.getProperty(propertyName)))
+      .getOrElse(defaultValue)
+  }
+
   val categoryFeeder = csv("data/categoryDetails.csv").random
   val jsonFeederProducts = jsonFile("data/productDetails.json").random
   val csvFeederLoginDetails = csv("data/loginDetails.csv").circular
+
+  val rnd = new Random()
+
+  def randomString(length: Int): String = {
+    rnd.alphanumeric.filter(_.isLetter).take(length).mkString
+  }
+
+  val initSession = exec(flushCookieJar)
+    .exec(session => session.set("randomNumber", rnd.nextInt))
+    .exec(session => session.set("customerLoggedIn", false))
+    .exec(session => session.set("cartTotal", 0.00))
+    .exec(addCookie(Cookie("sessionId", randomString(10)).withDomain(domain)))
 
   object CmsPages {
     def homepage = {
@@ -50,20 +75,27 @@ class DemostoreSimulation extends Simulation {
     object Product {
       def view = {
         feed(jsonFeederProducts)
-          .exec(http("Load Product Page - ${name}")
-            .get("/product/${slug}")
-            .check(status.is(200))
-            .check(css("#ProductDescription").is("${description}"))
+          .exec(
+            http("Load Product Page - ${name}")
+              .get("/product/${slug}")
+              .check(status.is(200))
+              .check(css("#ProductDescription").is("${description}"))
           )
       }
 
       def add = {
-        exec(view).
-          exec(http("Add Product to Cart")
-            .get("/cart/add/${id}")
-            .check(status.is(200))
-            .check(substring("items in your cart"))
+        exec(view)
+          .exec(
+            http("Add product to cart")
+              .get("/cart/add/${id}")
+              .check(status.is(200))
+              .check(substring("items in your cart"))
           )
+          .exec(session => {
+            val currentCartTotal = session("cartTotal").as[Double]
+            val itemPrice = session("price").as[Double]
+            session.set("cartTotal", (currentCartTotal + itemPrice))
+          })
       }
     }
   }
@@ -85,16 +117,21 @@ class DemostoreSimulation extends Simulation {
             .formParam("password", "${password}")
             .check(status.is(200))
         )
+        .exec(session => session.set("customerLoggedIn", true))
     }
   }
 
   object Checkout {
     def viewCart = {
-      exec(
-        http("Load Cart Page")
-          .get("/cart/view")
-          .check(status.is(200))
-      )
+      doIf(session => !session("customerLoggedIn").as[Boolean]) {
+        exec(Customer.login)
+      }
+        .exec(
+          http("Load Cart Page")
+            .get("/cart/view")
+            .check(status.is(200))
+            .check(css("#grandTotal").is("$$${cartTotal}"))
+        )
     }
 
     def completeCheckout = {
@@ -107,7 +144,8 @@ class DemostoreSimulation extends Simulation {
     }
   }
 
-  val scn = scenario("RecordedSimulation")
+  val scn = scenario("DemostoreSimulation")
+    .exec(initSession)
     .exec(CmsPages.homepage)
     .pause(2)
     .exec(CmsPages.aboutUs)
@@ -118,9 +156,75 @@ class DemostoreSimulation extends Simulation {
     .pause(2)
     .exec(Checkout.viewCart)
     .pause(2)
-    .exec(Customer.login)
-    .pause(2)
     .exec(Checkout.completeCheckout)
 
-  setUp(scn.inject(atOnceUsers(1))).protocols(httpProtocol)
+  object UserJourneys {
+    def minPause = 100.milliseconds
+
+    def maxPause = 500.milliseconds
+
+    def browseStore = {
+      exec(initSession)
+        .exec(CmsPages.homepage)
+        .pause(maxPause)
+        .exec(CmsPages.aboutUs)
+        .pause(minPause, maxPause)
+        .repeat(5) {
+          exec(Catalog.Category.view)
+            .pause(minPause, maxPause)
+            .exec(Catalog.Product.view)
+        }
+    }
+
+    def abandonCart = {
+      exec(initSession)
+        .exec(CmsPages.homepage)
+        .pause(maxPause)
+        .exec(Catalog.Category.view)
+        .pause(minPause, maxPause)
+        .exec(Catalog.Product.view)
+        .pause(minPause, maxPause)
+        .exec(Catalog.Product.add)
+    }
+
+    def completePurchase = {
+      exec(initSession)
+        .exec(CmsPages.homepage)
+        .pause(maxPause)
+        .exec(Catalog.Category.view)
+        .pause(minPause, maxPause)
+        .exec(Catalog.Product.view)
+        .pause(minPause, maxPause)
+        .exec(Catalog.Product.add)
+        .pause(minPause, maxPause)
+        .exec(Checkout.viewCart)
+        .pause(minPause, maxPause)
+        .exec(Checkout.completeCheckout)
+    }
+  }
+
+  object Scenarios {
+    def default = scenario("Default Load Test")
+      .during(testDuration.seconds) {
+        randomSwitch(
+          75d -> exec(UserJourneys.browseStore),
+          15d -> exec(UserJourneys.abandonCart),
+          10d -> exec(UserJourneys.completePurchase)
+        )
+      }
+
+    def highPurchase = scenario("High Purhcase Load Test")
+      .during(60.seconds) {
+        randomSwitch(
+          25d -> exec(UserJourneys.browseStore),
+          25d -> exec(UserJourneys.abandonCart),
+          50d -> exec(UserJourneys.completePurchase)
+        )
+      }
+  }
+
+  setUp(Scenarios.default
+    .inject(rampUsers(userCount) during (rampDuration.seconds))
+    .protocols(httpProtocol))
+
 }
